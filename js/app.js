@@ -13,7 +13,7 @@ const CONFIG = {
   physicalMarkerWidthMeters: 0.40,
   // Décalage du centre du bâtiment par rapport au centre du marqueur au sol (en mètres)
   // Exemple : si le marqueur est placé devant l'entrée Sud à 3.5 m du centre du bâtiment :
-  buildingOffset: new THREE.Vector3(0, 0, -3.5),
+  buildingOffset: new THREE.Vector3(0, 0, 0),
   // Rotation supplémentaire du bâtiment autour de l'axe vertical (en degrés)
   buildingRotationDeg: 0
 };
