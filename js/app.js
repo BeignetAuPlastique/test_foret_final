@@ -12,9 +12,9 @@ const CONFIG = {
   // Largeur réelle en mètres de ton image imprimée (ex: 0.20 pour 20 cm)
   physicalMarkerWidthMeters: 0.15,
   // Taille cible en mètres pour le test (mettre null pour garder l'échelle réelle 5m x 5m)
-  forceTestSizeMeters: 0.40,
+  forceTestSizeMeters: null,
   // Décalage du bâtiment par rapport au centre du marqueur (en mètres)
-  buildingOffset: new THREE.Vector3(0, 0, 0),
+  buildingOffset: new THREE.Vector3(0, 0, -2.0),
   buildingRotationDeg: 0
 };
 
