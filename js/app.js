@@ -115,19 +115,11 @@ function hardKillMindAR() {
 async function startMindARPhase() {
   try {
     document.body.classList.remove('xr-active');
-    statusBanner.textContent = 'Demande d’accès à la caméra...';
+    statusBanner.textContent = 'Ouverture de la caméra...';
     reticleGuide.classList.remove('hidden');
     btnLock.classList.add('hidden');
     btnReset.classList.add('hidden');
     solver.reset();
-
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      throw new Error('getUserMedia indisponible (HTTPS requis)');
-    }
-    const testStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'environment' }
-    });
-    testStream.getTracks().forEach((t) => t.stop());
 
     mindarThree = new MindARThree({
       container: document.querySelector('#mindar-container'),
@@ -162,6 +154,7 @@ async function startMindARPhase() {
     previewGroup.add(basePlate);
     anchor.group.add(previewGroup);
 
+    // Démarrage direct de MindAR sans pré-ouverture caméra
     await mindarThree.start();
 
     if (!buildingModel) {
@@ -205,7 +198,128 @@ async function startMindARPhase() {
     });
   } catch (err) {
     console.error('Erreur MindAR :', err);
-    statusBanner.textContent = `Erreur : ${err.message}`; } }  // ============================================================================ // PHASE 2 : ANCRAGE WEBXR DIRECT DANS LE REPÈRE CAMÉRA // ============================================================================ async function switchToWebXRLock() { const relativePose = solver.getSmoothedCameraRelativePose(); if (!relativePose) return;  statusBanner.textContent = 'Passage en mode 360°...'; btnLock.classList.add('hidden'); reticleGuide.classList.add('hidden');  hardKillMindAR(); await new Promise((r) => setTimeout(r, 250));  if (!navigator.xr \vert{}\vert{} !(await navigator.xr.isSessionSupported('immersive-ar'))) { statusBanner.textContent = 'WebXR non supporté sur ce navigateur.'; btnReset.classList.remove('hidden'); return; }  try { xrRenderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' }); xrRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5)); xrRenderer.setSize(window.innerWidth, window.innerHeight); xrRenderer.setClearColor(0x000000, 0); xrRenderer.xr.enabled = true; document.querySelector('#mindar-container').appendChild(xrRenderer.domElement);  const xrScene = new THREE.Scene(); const xrCamera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.05, 100);  const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.8); xrScene.add(hemiLight); const dirLight = new THREE.DirectionalLight(0xffffff, 1.4); dirLight.position.set(5, 10, 5); xrScene.add(dirLight);  xrSession = await navigator.xr.requestSession('immersive-ar', { requiredFeatures: ['local'], optionalFeatures: ['dom-overlay'], domOverlay: { root: document.getElementById('hud') } });  document.body.classList.add('xr-active'); xrRenderer.xr.setReferenceSpaceType('local'); await xrRenderer.xr.setSession(xrSession);  // Création du groupe monde contenant le modèle et son anneau vert au sol const worldAnchorGroup = new THREE.Group(); worldAnchorGroup.visible = false;  const basePlate = new THREE.Mesh( new THREE.RingGeometry(0.18, 0.24, 32), new THREE.MeshBasicMaterial({ color: 0x10b981, side: THREE.DoubleSide }) ); basePlate.rotation.x = -Math.PI / 2; worldAnchorGroup.add(basePlate);  const finalModel = (buildingModel \vert{}\vert{} createFallbackMesh()).clone(); finalModel.position.copy(CONFIG.buildingOffset); finalModel.rotation.y = THREE.MathUtils.degToRad(CONFIG.buildingRotationDeg); worldAnchorGroup.add(finalModel); xrScene.add(worldAnchorGroup);  // Normalisation sécurisée du vecteur relatif mesuré par MindAR // Dans MindAR, Z peut être positif (profondeur devant la caméra) -> on force -Z devant l'objectif const rel = relativePose.positionInCameraSpace.clone(); const forwardDist = Math.min(Math.max(Math.abs(rel.z), 0.4), 5.0); const safeRelVec = new THREE.Vector3(rel.x, rel.y, -forwardDist);  let isAnchoredInWorld = false; let frameCount = 0;  xrSession.addEventListener('end', () => { document.body.classList.remove('xr-active'); if (xrRenderer) { xrRenderer.setAnimationLoop(null); xrRenderer.dispose(); } xrSession = null; });  xrRenderer.setAnimationLoop((timestamp, frame) => { if (frame && !isAnchoredInWorld) { frameCount++; const refSpace = xrRenderer.xr.getReferenceSpace(); const viewerPose = frame.getViewerPose(refSpace);  if (viewerPose && frameCount >= 3) { const camMatrix = new THREE.Matrix4().fromArray(viewerPose.transform.matrix); const camPos = new THREE.Vector3(); const camQuat = new THREE.Quaternion(); const camScale = new THREE.Vector3(); camMatrix.decompose(camPos, camQuat, camScale);  // Projection du vecteur relatif (devant la caméra) dans l'espace monde WebXR const worldOffset = safeRelVec.clone().applyQuaternion(camQuat); worldAnchorGroup.position.copy(camPos).add(worldOffset);  // Orientation horizontale (Yaw) dans le monde const camForward = new THREE.Vector3(0, 0, -1).applyQuaternion(camQuat); camForward.y = 0; if (camForward.lengthSq() > 0.0001) { camForward.normalize(); } else { camForward.set(0, 1, 0).applyQuaternion(camQuat); camForward.y = 0; camForward.normalize(); }  const camYaw = Math.atan2(-camForward.x, -camForward.z); const worldYaw = camYaw + relativePose.yawInCameraSpace;  worldAnchorGroup.quaternion.setFromEuler(new THREE.Euler(0, worldYaw, 0, 'YXZ')); worldAnchorGroup.visible = true; isAnchoredInWorld = true;  const p = worldAnchorGroup.position; statusBanner.textContent = `Ancré (${p.x.toFixed(2)}m, ${p.y.toFixed(2)}m,${p.z.toFixed(2)}m)`;
+    statusBanner.textContent = `Erreur : ${err.name || ''} - ${err.message}`;
+  }
+}
+
+// ============================================================================
+// PHASE 2 : ANCRAGE WEBXR DIRECT DANS LE REPÈRE CAMÉRA
+// ============================================================================
+async function switchToWebXRLock() {
+  const relativePose = solver.getSmoothedCameraRelativePose();
+  if (!relativePose) return;
+
+  statusBanner.textContent = 'Passage en mode 360°...';
+  btnLock.classList.add('hidden');
+  reticleGuide.classList.add('hidden');
+
+  hardKillMindAR();
+  await new Promise((r) => setTimeout(r, 250));
+
+  if (!navigator.xr || !(await navigator.xr.isSessionSupported('immersive-ar'))) {
+    statusBanner.textContent = 'WebXR non supporté sur ce navigateur.';
+    btnReset.classList.remove('hidden');
+    return;
+  }
+
+  try {
+    xrRenderer = new THREE.WebGLRenderer({
+      antialias: true,
+      alpha: true,
+      powerPreference: 'high-performance'
+    });
+    xrRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+    xrRenderer.setSize(window.innerWidth, window.innerHeight);
+    xrRenderer.setClearColor(0x000000, 0);
+    xrRenderer.xr.enabled = true;
+    document.querySelector('#mindar-container').appendChild(xrRenderer.domElement);
+
+    const xrScene = new THREE.Scene();
+    const xrCamera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.05, 100);
+
+    const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.8);
+    xrScene.add(hemiLight);
+    const dirLight = new THREE.DirectionalLight(0xffffff, 1.4);
+    dirLight.position.set(5, 10, 5);
+    xrScene.add(dirLight);
+
+    xrSession = await navigator.xr.requestSession('immersive-ar', {
+      requiredFeatures: ['local'],
+      optionalFeatures: ['dom-overlay'],
+      domOverlay: { root: document.getElementById('hud') }
+    });
+
+    document.body.classList.add('xr-active');
+    xrRenderer.xr.setReferenceSpaceType('local');
+    await xrRenderer.xr.setSession(xrSession);
+
+    const worldAnchorGroup = new THREE.Group();
+    worldAnchorGroup.visible = false;
+
+    const basePlate = new THREE.Mesh(
+      new THREE.RingGeometry(0.18, 0.24, 32),
+      new THREE.MeshBasicMaterial({ color: 0x10b981, side: THREE.DoubleSide })
+    );
+    basePlate.rotation.x = -Math.PI / 2;
+    worldAnchorGroup.add(basePlate);
+
+    const finalModel = (buildingModel || createFallbackMesh()).clone();
+    finalModel.position.copy(CONFIG.buildingOffset);
+    finalModel.rotation.y = THREE.MathUtils.degToRad(CONFIG.buildingRotationDeg);
+    worldAnchorGroup.add(finalModel);
+    xrScene.add(worldAnchorGroup);
+
+    const rel = relativePose.positionInCameraSpace.clone();
+    const forwardDist = Math.min(Math.max(Math.abs(rel.z), 0.4), 5.0);
+    const safeRelVec = new THREE.Vector3(rel.x, rel.y, -forwardDist);
+
+    let isAnchoredInWorld = false;
+    let frameCount = 0;
+
+    xrSession.addEventListener('end', () => {
+      document.body.classList.remove('xr-active');
+      if (xrRenderer) {
+        xrRenderer.setAnimationLoop(null);
+        xrRenderer.dispose();
+      }
+      xrSession = null;
+    });
+
+    xrRenderer.setAnimationLoop((timestamp, frame) => {
+      if (frame && !isAnchoredInWorld) {
+        frameCount++;
+        const refSpace = xrRenderer.xr.getReferenceSpace();
+        const viewerPose = frame.getViewerPose(refSpace);
+
+        if (viewerPose && frameCount >= 3) {
+          const camMatrix = new THREE.Matrix4().fromArray(viewerPose.transform.matrix);
+          const camPos = new THREE.Vector3();
+          const camQuat = new THREE.Quaternion();
+          const camScale = new THREE.Vector3();
+          camMatrix.decompose(camPos, camQuat, camScale);
+
+          const worldOffset = safeRelVec.clone().applyQuaternion(camQuat);
+          worldAnchorGroup.position.copy(camPos).add(worldOffset);
+
+          const camForward = new THREE.Vector3(0, 0, -1).applyQuaternion(camQuat);
+          camForward.y = 0;
+          if (camForward.lengthSq() > 0.0001) {
+            camForward.normalize();
+          } else {
+            camForward.set(0, 1, 0).applyQuaternion(camQuat);
+            camForward.y = 0;
+            camForward.normalize();
+          }
+
+          const camYaw = Math.atan2(-camForward.x, -camForward.z);
+          const worldYaw = camYaw + relativePose.yawInCameraSpace;
+
+          worldAnchorGroup.quaternion.setFromEuler(new THREE.Euler(0, worldYaw, 0, 'YXZ'));
+          worldAnchorGroup.visible = true;
+          isAnchoredInWorld = true;
+
+          const p = worldAnchorGroup.position;
+          statusBanner.textContent = `Ancré (${p.x.toFixed(2)}m, ${p.y.toFixed(2)}m, ${p.z.toFixed(2)}m)`;
           btnReset.classList.remove('hidden');
         }
       }
@@ -215,4 +329,28 @@ async function startMindARPhase() {
   } catch (err) {
     document.body.classList.remove('xr-active');
     console.error('Échec WebXR :', err);
-    statusBanner.textContent = `Erreur WebXR : ${err
+    statusBanner.textContent = `Erreur WebXR : ${err.name} - ${err.message}`;
+    btnReset.classList.remove('hidden');
+  }
+}
+
+// ============================================================================
+// BOUTONS ET INITIALISATION
+// ============================================================================
+btnLock.addEventListener('click', () => {
+  switchToWebXRLock().catch((err) => {
+    console.error(err);
+    statusBanner.textContent = `Erreur WebXR : ${err.message}`;
+    btnReset.classList.remove('hidden');
+  });
+});
+
+btnReset.addEventListener('click', async () => {
+  if (xrSession) {
+    await xrSession.end();
+  }
+  document.querySelector('#mindar-container').innerHTML = '';
+  startMindARPhase();
+});
+
+startMindARPhase();
