@@ -13,8 +13,7 @@ const CONFIG = {
   physicalMarkerWidthMeters: 0.15,
   // Taille cible en mètres pour le test (mettre null pour garder l'échelle réelle Blender 5m x 5m)
   forceTestSizeMeters: 0.30,
-  // Décalage du bâtiment par rapport au centre du marqueur (en mètres, dans le repère de l'image)
-  // X = droite/gauche de l'image, Y = hauteur, Z = bas/haut de l'image (-Z = vers le haut de l'image)
+  // Décalage du bâtiment par rapport au centre du marqueur (en mètres)
   buildingOffset: new THREE.Vector3(0, 0, 0),
   buildingRotationDeg: 0
 };
@@ -133,14 +132,11 @@ async function startMindARPhase() {
 
   const anchor = mindarThree.addAnchor(0);
 
-  // Mise à l'échelle : 1 unité MindAR = physicalMarkerWidthMeters
   const metersToMarkerUnits = 1 / CONFIG.physicalMarkerWidthMeters;
   const previewGroup = new THREE.Group();
   previewGroup.scale.setScalar(metersToMarkerUnits);
-  // Aligne Y local du modèle avec la normale de l'image au sol (+Z MindAR)
   previewGroup.rotation.x = Math.PI / 2;
 
-  // Repère visuel au sol (anneau + flèche directionnelle vers le haut de l'image)
   const basePlate = new THREE.Mesh(
     new THREE.RingGeometry(0.11, 0.14, 32),
     new THREE.MeshBasicMaterial({ color: 0x10b981, side: THREE.DoubleSide })
@@ -178,164 +174,4 @@ async function startMindARPhase() {
       const pct = Math.round(solver.progress * 100);
 
       if (!solver.isReady) {
-        statusBanner.textContent = `Stabilisation du repère : ${pct}%`;
-        btnLock.classList.add('hidden');
-      } else {
-        statusBanner.textContent = 'Repère verrouillable ! Gardez l’image visible et cliquez.';
-        btnLock.classList.remove('hidden');
-      }
-    }
-    renderer.render(scene, camera);
-  });
-}
-
-// ============================================================================
-// PHASE 2 : TRANSFERT EXACT DE LA POSE CAMÉRA VERS L'ESPACE MONDE WEBXR
-// ============================================================================
-async function switchToWebXRLock() {
-  // Capture de la pose relative au téléphone à l'instant exact du clic
-  const relativePose = solver.getSmoothedCameraRelativePose();
-  if (!relativePose) return;
-
-  statusBanner.textContent = 'Verrouillage dans l’espace 3D...';
-  btnLock.classList.add('hidden');
-  reticleGuide.classList.add('hidden');
-
-  // 1. Arrêt complet de MindAR (ne pas bouger le téléphone pendant les 250 ms de bascule)
-  hardKillMindAR();
-  await new Promise((r) => setTimeout(r, 250));
-
-  if (!navigator.xr || !(await navigator.xr.isSessionSupported('immersive-ar'))) {
-    statusBanner.textContent = 'WebXR non supporté sur ce navigateur.';
-    btnReset.classList.remove('hidden');
-    return;
-  }
-
-  try {
-    xrRenderer = new THREE.WebGLRenderer({
-      antialias: true,
-      alpha: true,
-      powerPreference: 'high-performance'
-    });
-    xrRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
-    xrRenderer.setSize(window.innerWidth, window.innerHeight);
-    xrRenderer.setClearColor(0x000000, 0);
-    xrRenderer.xr.enabled = true;
-    document.querySelector('#mindar-container').appendChild(xrRenderer.domElement);
-
-    const xrScene = new THREE.Scene();
-    const xrCamera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.05, 100);
-
-    const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.6);
-    xrScene.add(hemiLight);
-    const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
-    dirLight.position.set(5, 10, 5);
-    xrScene.add(dirLight);
-
-    xrSession = await navigator.xr.requestSession('immersive-ar', {
-      optionalFeatures: ['local-floor', 'dom-overlay'],
-      domOverlay: { root: document.getElementById('hud') }
-    });
-
-    document.body.classList.add('xr-active');
-
-    let refSpaceType = 'local-floor';
-    try {
-      await xrSession.requestReferenceSpace('local-floor');
-    } catch {
-      refSpaceType = 'local';
-    }
-    xrRenderer.xr.setReferenceSpaceType(refSpaceType);
-    await xrRenderer.xr.setSession(xrSession);
-
-    // Groupe monde qui recevra les coordonnées exactes à la 1ère frame XR
-    const worldAnchorGroup = new THREE.Group();
-    worldAnchorGroup.visible = false;
-
-    const basePlate = new THREE.Mesh(
-      new THREE.RingGeometry(0.11, 0.14, 32),
-      new THREE.MeshBasicMaterial({ color: 0x10b981, side: THREE.DoubleSide })
-    );
-    basePlate.rotation.x = -Math.PI / 2;
-    worldAnchorGroup.add(basePlate);
-
-    const finalModel = buildingModel.clone();
-    finalModel.position.copy(CONFIG.buildingOffset);
-    finalModel.rotation.y = THREE.MathUtils.degToRad(CONFIG.buildingRotationDeg);
-    worldAnchorGroup.add(finalModel);
-    xrScene.add(worldAnchorGroup);
-
-    let isAnchoredInWorld = false;
-
-    xrSession.addEventListener('end', () => {
-      document.body.classList.remove('xr-active');
-      if (xrRenderer) {
-        xrRenderer.setAnimationLoop(null);
-        xrRenderer.dispose();
-      }
-      xrSession = null;
-    });
-
-    xrRenderer.setAnimationLoop(() => {
-      // À la toute première frame où WebXR fournit la matrice de la caméra :
-      // on projette la position relative du marqueur dans le repère monde SLAM.
-      if (!isAnchoredInWorld) {
-        const xrCam = xrRenderer.xr.getCamera();
-        xrCam.updateMatrixWorld(true);
-
-        // Vérifie que WebXR a initialisé la pose de la caméra
-        if (xrCam.matrixWorld.elements[15] !== 0) {
-          // 1. Position du marqueur dans le monde = PositionCaméra + RotationCaméra * PositionRelative
-          const worldMarkerPos = relativePose.positionInCameraSpace
-            .clone()
-            .applyMatrix4(xrCam.matrixWorld);
-
-          worldAnchorGroup.position.copy(worldMarkerPos);
-
-          // 2. Orientation horizontale (Yaw) dans le monde = AzimutCaméra + AzimutRelativeMarqueur
-          const camForward = new THREE.Vector3(0, 0, -1).applyQuaternion(xrCam.quaternion);
-          const camYaw = Math.atan2(-camForward.x, -camForward.z);
-          const worldYaw = camYaw + relativePose.yawInCameraSpace;
-
-          worldAnchorGroup.quaternion.setFromEuler(new THREE.Euler(0, worldYaw, 0, 'YXZ'));
-          worldAnchorGroup.visible = true;
-          isAnchoredInWorld = true;
-
-          statusBanner.textContent = 'Ancré sur la position du marqueur ! Tournez autour à 360°.';
-          btnReset.classList.remove('hidden');
-        }
-      }
-
-      xrRenderer.render(xrScene, xrCamera);
-    });
-  } catch (err) {
-    document.body.classList.remove('xr-active');
-    console.error('Échec WebXR :', err);
-    statusBanner.textContent = `Erreur WebXR : ${err.name} - ${err.message}`;
-    btnReset.classList.remove('hidden');
-  }
-}
-
-// ============================================================================
-// BOUTONS ET INITIALISATION
-// ============================================================================
-btnLock.addEventListener('click', () => {
-  switchToWebXRLock().catch((err) => {
-    console.error(err);
-    statusBanner.textContent = `Erreur WebXR : ${err.message}`;
-    btnReset.classList.remove('hidden');
-  });
-});
-
-btnReset.addEventListener('click', async () => {
-  if (xrSession) {
-    await xrSession.end();
-  }
-  document.querySelector('#mindar-container').innerHTML = '';
-  startMindARPhase();
-});
-
-startMindARPhase().catch((err) => {
-  console.error(err);
-  statusBanner.textContent = 'Erreur d’accès à la caméra. Vérifiez les permissions HTTPS.';
-});
+        statusBanner.textContent = `Stabilisation du rep
