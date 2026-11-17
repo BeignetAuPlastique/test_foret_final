@@ -1,64 +1,78 @@
 import * as THREE from 'three';
 
 /**
- * Accumule N mesures de matrice pour calculer une pose moyenne stable
- * et projette l'orientation sur le plan horizontal (gravité).
+ * Calcule et lisse la position 3D (en mètres) et l'orientation horizontale (azimut)
+ * d'un marqueur posé à plat au sol, exprimés dans le repère de la caméra.
  */
-export class PoseStabilizer {
-  constructor(sampleTarget = 25) {
-    this.sampleTarget = sampleTarget;
-    this.positions = [];
-    this.quaternions = [];
+export class MarkerCameraSolver {
+  constructor(markerWidthMeters, windowSize = 15) {
+    this.markerWidthMeters = markerWidthMeters;
+    this.windowSize = windowSize;
+    this.samples = [];
   }
 
   reset() {
-    this.positions = [];
-    this.quaternions = [];
+    this.samples = [];
   }
 
   get progress() {
-    return Math.min(1, this.positions.length / this.sampleTarget);
+    return Math.min(1, this.samples.length / this.windowSize);
   }
 
   get isReady() {
-    return this.positions.length >= this.sampleTarget;
-  }
-
-  addMatrix(matrixWorld) {
-    const pos = new THREE.Vector3();
-    const quat = new THREE.Quaternion();
-    const scale = new THREE.Vector3();
-    matrixWorld.decompose(pos, quat, scale);
-
-    this.positions.push(pos);
-    this.quaternions.push(quat);
+    return this.samples.length >= this.windowSize;
   }
 
   /**
-   * Retourne la position moyenne et un quaternion strictement horizontal (Yaw uniquement).
-   * Indispensable pour un bâtiment de 5m x 5m afin d'éviter toute inclinaison due au sol irrégulier.
+   * Ajoute une mesure issue de la matrice monde de l'ancre MindAR.
+   * Dans MindAR, la caméra est fixe à l'origine (0,0,0) et regarde vers -Z.
+   * 1 unité MindAR = largeur physique du marqueur.
    */
-  getLevelPose() {
-    if (this.positions.length === 0) return null;
+  addSample(anchorMatrixWorld) {
+    // 1. Position du centre du marqueur par rapport à la caméra, convertie en mètres
+    const posMarkerUnits = new THREE.Vector3();
+    const quat = new THREE.Quaternion();
+    const scale = new THREE.Vector3();
+    anchorMatrixWorld.decompose(posMarkerUnits, quat, scale);
 
-    // 1. Moyenne arithmétique de la position
+    const posMeters = posMarkerUnits.multiplyScalar(this.markerWidthMeters);
+
+    // 2. Direction du "haut" de l'image imprimée (axe Y local du marqueur) dans le repère caméra
+    const imageUpAxis = new THREE.Vector3(0, 1, 0).applyQuaternion(quat);
+
+    // Projection sur le plan horizontal (X, Z) de la caméra pour obtenir l'azimut au sol
+    // Angle par rapport à l'axe -Z (devant la caméra)
+    const yawRad = Math.atan2(-imageUpAxis.x, -imageUpAxis.z);
+
+    this.samples.push({ pos: posMeters, yaw: yawRad });
+    if (this.samples.length > this.windowSize) {
+      this.samples.shift(); // Fenêtre glissante sur les 15 dernières frames
+    }
+  }
+
+  /**
+   * Retourne la pose moyenne lissée par rapport à la caméra à l'instant T.
+   */
+  getSmoothedCameraRelativePose() {
+    if (this.samples.length === 0) return null;
+
     const avgPos = new THREE.Vector3();
-    for (const p of this.positions) {
-      avgPos.add(p);
-    }
-    avgPos.divideScalar(this.positions.length);
+    let sinSum = 0;
+    let cosSum = 0;
 
-    // 2. Moyenne sphérique (SLERP cumulatif) des quaternions
-    const avgQuat = this.quaternions[0].clone();
-    for (let i = 1; i < this.quaternions.length; i++) {
-      avgQuat.slerp(this.quaternions[i], 1 / (i + 1));
+    for (const s of this.samples) {
+      avgPos.add(s.pos);
+      sinSum += Math.sin(s.yaw);
+      cosSum += Math.cos(s.yaw);
     }
 
-    // 3. Extraction de l'angle autour de l'axe vertical Y (azimut) uniquement
-    // Dans MindAR, l'axe Z local du marqueur pointe vers le haut quand l'image est au sol.
-    const euler = new THREE.Euler().setFromQuaternion(avgQuat, 'YXZ');
-    const levelQuat = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, euler.y, 0, 'YXZ'));
+    avgPos.divideScalar(this.samples.length);
+    // Moyenne circulaire des angles pour éviter le saut -PI / +PI
+    const avgYaw = Math.atan2(sinSum / this.samples.length, cosSum / this.samples.length);
 
-    return { position: avgPos, quaternion: levelQuat };
+    return {
+      positionInCameraSpace: avgPos, // Vecteur (X, Y, Z) en mètres depuis l'objectif
+      yawInCameraSpace: avgYaw         // Rotation horizontale (rad) par rapport à la visée
+    };
   }
 }
