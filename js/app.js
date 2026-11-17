@@ -104,6 +104,7 @@ function hardKillMindAR() {
 // PHASE 1 : CALAGE MINDAR SUR LE MARQUEUR
 // ============================================================================
 async function startMindARPhase() {
+  document.body.classList.remove('xr-active');
   statusBanner.textContent = 'Chargement du modèle 3D...';
   reticleGuide.classList.remove('hidden');
   btnLock.classList.add('hidden');
@@ -189,107 +190,142 @@ async function startMindARPhase() {
 }
 
 // ============================================================================
-// PHASE 2 : BASCULE WEBXR FLUIDE (60 FPS) + ANCRAGE AU SOL RÉEL
+// PHASE 2 : BASCULE WEBXR FLUIDE + PLACEMENT IMMÉDIAT GARANTI
 // ============================================================================
 async function switchToWebXRLock() {
   const calibratedPose = stabilizer.getLevelPose();
   if (!calibratedPose) return;
 
-  statusBanner.textContent = 'Libération caméra et passage en mode 360°...';
+  statusBanner.textContent = 'Activation du mode 360°...';
   btnLock.classList.add('hidden');
   reticleGuide.classList.add('hidden');
 
-  // 1. Arrêt matériel total de MindAR avant d'ouvrir WebXR
+  // 1. Arrêt complet de MindAR
   hardKillMindAR();
-  // Courte pause de 250 ms pour laisser le pilote caméra Android libérer le capteur haute résolution
-  await new Promise((r) => setTimeout(r, 250));
+  await new Promise((r) => setTimeout(r, 300));
 
-  if (!navigator.xr || !(await navigator.xr.isSessionSupported('immersive-ar'))) {
-    statusBanner.textContent = 'WebXR non supporté sur ce navigateur (utilisez Chrome Android).';
+  if (!navigator.xr) {
+    statusBanner.textContent = 'Erreur : navigator.xr indisponible (HTTPS requis).';
     btnReset.classList.remove('hidden');
     return;
   }
 
-  // 2. Renderer WebXR optimisé (pixelRatio plafonné = caméra nette + 60 FPS)
-  xrRenderer = new THREE.WebGLRenderer({
-    antialias: true,
-    alpha: true,
-    powerPreference: 'high-performance'
-  });
-  xrRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
-  xrRenderer.setSize(window.innerWidth, window.innerHeight);
-  xrRenderer.xr.enabled = true;
-  document.querySelector('#mindar-container').appendChild(xrRenderer.domElement);
+  const supported = await navigator.xr.isSessionSupported('immersive-ar');
+  if (!supported) {
+    statusBanner.textContent = 'Erreur : WebXR immersive-ar non supporté sur ce navigateur.';
+    btnReset.classList.remove('hidden');
+    return;
+  }
 
-  const xrScene = new THREE.Scene();
-  const xrCamera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.05, 100);
+  try {
+    // 2. Configuration du renderer transparent
+    xrRenderer = new THREE.WebGLRenderer({
+      antialias: true,
+      alpha: true,
+      powerPreference: 'high-performance'
+    });
+    xrRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+    xrRenderer.setSize(window.innerWidth, window.innerHeight);
+    xrRenderer.setClearColor(0x000000, 0);
+    xrRenderer.xr.enabled = true;
+    document.querySelector('#mindar-container').appendChild(xrRenderer.domElement);
 
-  const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.6);
-  xrScene.add(hemiLight);
-  const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
-  dirLight.position.set(5, 10, 5);
-  xrScene.add(dirLight);
+    const xrScene = new THREE.Scene();
+    const xrCamera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.05, 100);
 
-  // 3. Session WebXR avec hit-test pour détecter l'altitude réelle du sol
-  xrSession = await navigator.xr.requestSession('immersive-ar', {
-    requiredFeatures: ['local-floor', 'hit-test'],
-    optionalFeatures: ['dom-overlay'],
-    domOverlay: { root: document.getElementById('hud') }
-  });
+    const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.6);
+    xrScene.add(hemiLight);
+    const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
+    dirLight.position.set(5, 10, 5);
+    xrScene.add(dirLight);
 
-  xrRenderer.xr.setReferenceSpaceType('local-floor');
-  await xrRenderer.xr.setSession(xrSession);
+    // 3. Démarrage session WebXR (local-floor et hit-test en optionnel pour éviter tout blocage)
+    xrSession = await navigator.xr.requestSession('immersive-ar', {
+      optionalFeatures: ['local-floor', 'hit-test', 'dom-overlay'],
+      domOverlay: { root: document.getElementById('hud') }
+    });
 
-  const viewerSpace = await xrSession.requestReferenceSpace('viewer');
-  const hitTestSource = await xrSession.requestHitTestSource({ space: viewerSpace });
+    document.body.classList.add('xr-active');
 
-  // Groupe contenant le modèle verrouillé dans le monde
-  const worldAnchorGroup = new THREE.Group();
-  worldAnchorGroup.visible = false; // Affiché dès que le sol est détecté (1ère frame)
-  worldAnchorGroup.quaternion.copy(calibratedPose.quaternion);
-
-  const finalModel = buildingModel.clone();
-  finalModel.position.copy(CONFIG.buildingOffset);
-  finalModel.rotation.y = THREE.MathUtils.degToRad(CONFIG.buildingRotationDeg);
-  worldAnchorGroup.add(finalModel);
-  xrScene.add(worldAnchorGroup);
-
-  let isPlacedOnFloor = false;
-
-  xrSession.addEventListener('end', () => {
-    if (xrRenderer) {
-      xrRenderer.setAnimationLoop(null);
-      xrRenderer.dispose();
+    // Choix automatique du meilleur espace de référence disponible
+    let refSpaceType = 'local-floor';
+    try {
+      await xrSession.requestReferenceSpace('local-floor');
+    } catch {
+      refSpaceType = 'local';
     }
-    xrSession = null;
-  });
+    xrRenderer.xr.setReferenceSpaceType(refSpaceType);
+    await xrRenderer.xr.setSession(xrSession);
 
-  xrRenderer.setAnimationLoop((timestamp, frame) => {
-    // Au premier rayon frappant le sol devant la caméra, on verrouille définitivement la position
-    if (frame && !isPlacedOnFloor && hitTestSource) {
-      const referenceSpace = xrRenderer.xr.getReferenceSpace();
-      const hitTestResults = frame.getHitTestResults(hitTestSource);
-      if (hitTestResults.length > 0) {
-        const hitPose = hitTestResults[0].getPose(referenceSpace);
-        worldAnchorGroup.position.set(
-          hitPose.transform.position.x,
-          hitPose.transform.position.y,
-          hitPose.transform.position.z
-        );
-        worldAnchorGroup.visible = true;
-        isPlacedOnFloor = true;
-        hitTestSource.cancel();
-        statusBanner.textContent = 'Modèle verrouillé au sol ! Tournez autour à 360°.';
-        btnReset.classList.remove('hidden');
-      } else {
-        statusBanner.textContent = 'Inclinez légèrement le téléphone vers le sol pour verrouiller...';
+    // Tentative d'initialisation du hit-test (non bloquante si indisponible)
+    let hitTestSource = null;
+    try {
+      const viewerSpace = await xrSession.requestReferenceSpace('viewer');
+      hitTestSource = await xrSession.requestHitTestSource({ space: viewerSpace });
+    } catch (e) {
+      console.warn('Hit-test non disponible, placement relatif utilisé :', e);
+    }
+
+    // 4. Création et affichage IMMÉDIAT du modèle dans l'espace monde
+    const worldAnchorGroup = new THREE.Group();
+    worldAnchorGroup.visible = true;
+    worldAnchorGroup.quaternion.copy(calibratedPose.quaternion);
+
+    // Position initiale par défaut : 1.5 m devant l'utilisateur, au niveau du sol
+    const defaultY = refSpaceType === 'local-floor' ? 0 : -1.2;
+    worldAnchorGroup.position.set(0, defaultY, -1.5);
+
+    const finalModel = buildingModel.clone();
+    finalModel.position.copy(CONFIG.buildingOffset);
+    finalModel.rotation.y = THREE.MathUtils.degToRad(CONFIG.buildingRotationDeg);
+    worldAnchorGroup.add(finalModel);
+    xrScene.add(worldAnchorGroup);
+
+    statusBanner.textContent = 'Mode 360° actif ! Tournez autour du modèle.';
+    btnReset.classList.remove('hidden');
+
+    let snappedToFloor = false;
+
+    xrSession.addEventListener('end', () => {
+      document.body.classList.remove('xr-active');
+      if (xrRenderer) {
+        xrRenderer.setAnimationLoop(null);
+        xrRenderer.dispose();
       }
-    }
+      xrSession = null;
+    });
 
-    xrRenderer.render(xrScene, xrCamera);
-  });
+    xrRenderer.setAnimationLoop((timestamp, frame) => {
+      // Si le hit-test détecte le sol réel lors des premières frames, on cale la position exacte
+      if (frame && !snappedToFloor && hitTestSource) {
+        const referenceSpace = xrRenderer.xr.getReferenceSpace();
+        const hitTestResults = frame.getHitTestResults(hitTestSource);
+        if (hitTestResults.length > 0) {
+          const hitPose = hitTestResults[0].getPose(referenceSpace);
+          worldAnchorGroup.position.set(
+            hitPose.transform.position.x,
+            hitPose.transform.position.y,
+            hitPose.transform.position.z
+          );
+          snappedToFloor = true;
+          hitTestSource.cancel();
+          statusBanner.textContent = 'Ancré au sol ! Tournez autour à 360°.';
+        }
+      }
+
+      xrRenderer.render(xrScene, xrCamera);
+    });
+  } catch (err) {
+    document.body.classList.remove('xr-active');
+    console.error('Échec WebXR :', err);
+    statusBanner.textContent = `Erreur WebXR : ${err.name} - ${err.message}`;
+    btnReset.classList.remove('hidden');
+  }
 }
 
+// ============================================================================
+// GESTION DES BOUTONS ET LANCEMENT
+// ============================================================================
 btnLock.addEventListener('click', () => {
   switchToWebXRLock().catch((err) => {
     console.error(err);
